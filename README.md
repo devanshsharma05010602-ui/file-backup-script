@@ -1,169 +1,205 @@
-# Project 3 (Experiment 9): File Backup Script
+# Project 3 — File Backup Script (CentOS)
 
-A Bash script that automatically backs up one directory to another using **rsync** (incremental snapshots) and **tar + bzip2** (compressed archives), scheduled with **cron**.
+A Bash utility that backs up a source directory to a destination directory. It creates timestamped snapshots with `rsync`, can make compressed `.tar.bz2` archives, keeps a configurable number of recent backups, writes a log, prevents overlapping runs, and can be scheduled with `cron`.
 
-## 1. Objective
+This version is set up for **CentOS** (CentOS Stream), for example running in Oracle VirtualBox. The script itself is plain Bash and also runs on other Linux distributions.
 
-- Automate file backups from a source directory to a destination directory.
-- Save disk space with incremental backups (unchanged files are hard-linked).
-- Keep compressed full archives.
-- Log every step and rotate old backups.
-- Run everything automatically with cron.
+## Features
 
-## 2. Files
+- Timestamped, browsable backup snapshots.
+- Incremental space saving with `rsync --link-dest` (unchanged files are hard-linked to the previous snapshot).
+- Optional compressed archive with `tar` + `bzip2` using `-c`.
+- `latest` symbolic link to the newest completed snapshot.
+- Retention/rotation with `-k N` (default 5).
+- Timestamped log at `log/backup.log`.
+- Locking with `flock`; incomplete rsync copies are never promoted to completed snapshots.
+- Input validation and a small integration test (`test_backup.sh`).
 
-| File | Purpose |
-|---|---|
-| `backup_script.sh` | The backup script |
-| `log/backup.log` | Created automatically on first run |
-| `README.md` | This report |
+## Setup on CentOS
 
-## 3. Requirements and setup
+Use a normal user account that can run `sudo`.
+
+1. Install the required tools. CentOS Stream and newer releases use `dnf`; on older CentOS replace `dnf` with `yum`:
+
+   ```bash
+   sudo dnf install -y rsync tar bzip2 util-linux cronie git unzip
+   ```
+
+2. Get the project, either by cloning from GitHub or by extracting the ZIP:
+
+   ```bash
+   git clone https://github.com/devanshsharma05010602-ui/file-backup-script.git
+   cd file-backup-script
+   ```
+
+   or
+
+   ```bash
+   unzip file-backup-script-main.zip
+   cd file-backup-script-main
+   ```
+
+3. Make the scripts executable:
+
+   ```bash
+   chmod +x backup_script.sh test_backup.sh
+   ```
+
+Tip: if the project files are on a Windows host, copy them into the VM's home folder (for example with a VirtualBox shared folder or `git clone`) and run everything from there. Avoid running scripts directly from a shared folder, because file permissions there can cause surprises.
+
+## Requirements
+
+CentOS (or another Linux), Bash, `rsync`, `tar`, `bzip2`, `flock` and `realpath` (both from `util-linux`/`coreutils`, installed by default), and `cronie` for scheduling.
+
+## Quick start
+
+Run these commands from the project directory as your normal user (not with `sudo`):
 
 ```bash
-sudo apt install rsync        # Debian/Ubuntu
-chmod +x backup_script.sh
+mkdir -p ~/backup-demo/source ~/backup-demo/destination
+echo "My first backup file" > ~/backup-demo/source/notes.txt
+./backup_script.sh -c -k 5 ~/backup-demo/source ~/backup-demo/destination
 ```
 
-## 4. Usage
+The destination must already exist. Expected layout:
+
+```text
+~/backup-demo/destination/
+├── .backup.lock
+├── backup_YYYY-MM-DD_HH-MM-SS/       # browsable snapshot
+├── latest -> backup_YYYY-MM-DD_HH-MM-SS
+└── archives/
+    └── backup_YYYY-MM-DD_HH-MM-SS.tar.bz2
+```
+
+## Command syntax
 
 ```bash
-./backup_script.sh [-c] [-k N] <source_directory> <destination_directory>
+./backup_script.sh [-c] [-k N] SOURCE_DIRECTORY DESTINATION_DIRECTORY
 ```
 
 | Option | Meaning |
 |---|---|
-| `-c` | Also create a compressed `.tar.bz2` archive of the backup |
-| `-k N` | Keep only the newest N backups (default 5) |
+| `-c` | Create a compressed `.tar.bz2` archive as well as the snapshot |
+| `-k N` | Retain the newest N snapshots and (when `-c` is used) archives; default is 5 |
+| `-h` | Show help |
 
-Example:
-
-```bash
-mkdir -p ~/project_data ~/backups
-echo "hello" > ~/project_data/a.txt
-./backup_script.sh -c -k 5 ~/project_data ~/backups
-```
-
-Resulting layout:
-
-```
-~/backups/
-├── backup_2026-10-25_18-00-00/     <- snapshot (full browsable copy)
-├── backup_2026-10-25_19-00-00/
-├── latest -> backup_2026-10-25_19-00-00
-└── archives/
-    └── backup_2026-10-25_19-00-00.tar.bz2
-```
-
-## 5. How the script works
-
-1. **Parameter check:** `getopts` reads the options; `$#` must equal 2 after that, otherwise a usage message is shown and the script exits with `exit 1`.
-2. **Validation:** source and destination must be existing directories, must differ, and the destination must not be inside the source (otherwise the backup would copy itself endlessly). It also checks that rsync is installed.
-3. **Logging:** a `log()` function writes timestamped lines to `log/backup.log` (stored next to the script, so cron runs find it regardless of the working directory) and prints them on screen.
-4. **Lock:** `flock` stops two backups from running at the same time.
-5. **Incremental snapshot:** `rsync -a --delete --link-dest=<previous backup>` copies the source into a new timestamped folder.
-   - Unchanged files become **hard links** to the previous backup (same inode, no extra space).
-   - New or changed files are copied.
-   - `--delete` removes files from the new snapshot if they were deleted in the source.
-   - The copy goes to a `.partial` folder first and is renamed only on success, so a failed run never leaves a half-finished backup.
-6. **`latest` symlink:** `ln -sfn` always points to the newest backup.
-7. **Compression (`-c`):** `tar -cjf` creates `archives/backup_<timestamp>.tar.bz2`.
-8. **Rotation:** if there are more than N backups (default 5), the oldest are deleted. Because of hard links, deleting an old snapshot never damages newer ones.
-
-## 6. Scheduling with cron
-
-Open the crontab:
+Examples:
 
 ```bash
-crontab -e
+# Normal snapshot
+./backup_script.sh ~/Documents ~/backups/documents
+
+# Snapshot plus compressed archive; keep last 7
+./backup_script.sh -c -k 7 ~/Documents ~/backups/documents
+
+# Help
+./backup_script.sh -h
 ```
 
-Add (use full absolute paths; cron has a minimal environment):
+Create the destination directory before running. Do not use the source folder itself as the destination. The script rejects identical, nested, or non-existent source/destination directories.
 
-```cron
-# Every day at 5:30 PM - incremental snapshot, keep 7
-30 17 * * *  /home/user/linux_backup_project/backup_script.sh -k 7 /home/user/project_data /home/user/backups/daily
+## How it works
 
-# Every Friday at 6:00 PM - snapshot + compressed archive, keep 4
-00 18 * * 5  /home/user/linux_backup_project/backup_script.sh -c -k 4 /home/user/project_data /home/user/backups/weekly
+1. Validates arguments, directories, and required commands.
+2. Writes a timestamped status message to `log/backup.log` and the terminal.
+3. Acquires a lock so scheduled and manual backups do not overlap.
+4. Uses `rsync -a --delete` to create a new snapshot in a temporary `.partial` directory. `--link-dest` reuses unchanged files from the previous snapshot.
+5. Renames a successful temporary copy to a timestamped snapshot and updates `latest`.
+6. If `-c` is passed, creates a `.tar.bz2` archive.
+7. Deletes snapshots/archives older than the configured retention count.
 
-# 1st of every month at 6:00 AM - snapshot + compressed archive, keep 12
-00 6 1 * *   /home/user/linux_backup_project/backup_script.sh -c -k 12 /home/user/project_data /home/user/backups/monthly
-```
+**Caution:** `--delete` makes the snapshot reflect the current source, including source deletions. The script does not delete source files, but always double-check source and destination paths before running it.
 
-The destination folders must exist first: `mkdir -p ~/backups/{daily,weekly,monthly}`.
-
-Cron field order: `minute hour day-of-month month day-of-week command`.
-
-Check the schedule with `crontab -l`, and the results with `tail -f log/backup.log`.
-(For a quick test, use `* * * * *` to run every minute, then change it back.)
-
-## 7. Testing and verification
+## Test the project
 
 ```bash
-# Setup
-mkdir -p ~/src ~/dst
-echo a > ~/src/a.txt; echo b > ~/src/b.txt
-
-# Run 1: full copy
-./backup_script.sh ~/src ~/dst
-
-# Change the source: add c.txt, delete b.txt
-echo c > ~/src/c.txt; rm ~/src/b.txt
-sleep 1
-./backup_script.sh -c ~/src ~/dst
-
-# Verify hard links: a.txt has the SAME inode number in both backups
-ls -li ~/dst/backup_*/a.txt
-
-# Verify the symlink and archive
-ls -l ~/dst ~/dst/archives
-
-# Verify rotation: run with -k 2 several times, only 2 backups remain
-for i in 1 2 3; do sleep 1; ./backup_script.sh -k 2 ~/src ~/dst; done
-ls ~/dst
-
-# Verify error handling
-./backup_script.sh                    # usage message
-./backup_script.sh ~/src /nonexistent # directory error
-
-# Restore a file from a compressed archive
-mkdir ~/restore && tar -xjf ~/dst/archives/backup_*.tar.bz2 -C ~/restore
+./test_backup.sh
 ```
 
-Take screenshots of these outputs for your submission.
+The test uses temporary folders, verifies the latest snapshot and compressed archive, extracts the archive to verify its contents, and runs a second backup. It cleans up its temporary files afterward and ends with a `PASS` message.
 
-## 8. Tools compared
+You can also test manually:
 
-| | rsync | tar + bzip2 |
-|---|---|---|
-| Type | Incremental sync | Full archive |
-| Space use | Very low (hard links) | Smaller via compression, but a full copy each time |
-| Speed | Fast (only changes) | Slower (reads everything) |
-| Browse without extracting | Yes | No |
-| Best for | Daily/frequent backups | Monthly, long-term storage |
+```bash
+mkdir -p ~/backup-demo/source ~/backup-demo/destination
+echo one > ~/backup-demo/source/a.txt
+./backup_script.sh ~/backup-demo/source ~/backup-demo/destination
+cat ~/backup-demo/destination/latest/a.txt
+```
 
-## 9. Course outcome mapping
+Inspect the log:
 
-- **CO1:** Hard links, inodes, symlinks, exit codes, cron environment.
-- **CO2:** Script and cron configuration, rsync and tar execution.
-- **CO3:** Input validation, error handling, logs to diagnose failures, a lock for process control.
-- **CO4:** Performance (incremental vs. full) and safety (`--delete` precautions, partial-copy protection, destination-inside-source check).
-- **CO5:** A rotation policy with daily, weekly and monthly strategies.
+```bash
+tail -n 30 log/backup.log
+```
 
-## 10. Possible viva questions
+## Schedule with cron
 
-- **Why `#!/bin/bash`?** It tells the system which interpreter runs the script.
-- **What does `$#` mean?** The number of arguments passed.
-- **What does `rsync -a` do?** Archive mode: recursive, and preserves permissions, timestamps, symlinks and ownership.
-- **What does `--link-dest` do?** It hard-links unchanged files to the previous backup instead of copying them.
-- **What is the danger of `--delete`?** If source and destination are swapped, you can wipe your data. The script checks both paths first.
-- **Why use full paths in cron?** Cron runs with a minimal `PATH` and a different working directory.
-- **Hard link vs. symlink?** A hard link is another name for the same inode (data survives if the original name is deleted). A symlink is a pointer to a path and breaks if the target is removed.
+On CentOS the cron service is called `crond` (package `cronie`). Ensure the destination exists and test the exact command manually before scheduling it.
 
-## 11. Limitations / future improvements
+1. Enable and start cron:
 
-- Destination paths containing spaces are not supported in the rotation step.
-- Email alerts on failure.
-- Backing up to a remote server over SSH (`rsync -e ssh`).
-- Exclude patterns (`--exclude`).
+   ```bash
+   sudo systemctl enable --now crond
+   systemctl status crond
+   ```
+
+2. Open your user crontab:
+
+   ```bash
+   crontab -e
+   ```
+
+3. Add a line like the following, replacing `/home/YOUR_USER/...` with the real absolute paths (`echo $HOME` shows your home folder):
+
+   ```cron
+   # Every day at 5:30 PM; retain 7 snapshots
+   30 17 * * * /home/YOUR_USER/file-backup-script/backup_script.sh -k 7 /home/YOUR_USER/backup-demo/source /home/YOUR_USER/backup-demo/destination >> /home/YOUR_USER/file-backup-script/cron.log 2>&1
+   ```
+
+   For a one-minute test only, use `* * * * *` temporarily, verify the log, then replace it with the daily schedule.
+
+4. Verify the schedule:
+
+   ```bash
+   crontab -l
+   tail -n 30 ~/file-backup-script/log/backup.log
+   sudo grep CRON /var/log/cron      # cron's own activity log on CentOS
+   ```
+
+Cron jobs run only while the CentOS machine (or VM) is running and `crond` is active.
+
+## Restore files
+
+From a snapshot, copy the required file from `DESTINATION/latest/`. To extract a compressed archive:
+
+```bash
+mkdir -p ~/backup-demo/restore
+tar -xjf ~/backup-demo/destination/archives/backup_YYYY-MM-DD_HH-MM-SS.tar.bz2 -C ~/backup-demo/restore
+```
+
+Replace the example archive name with an actual filename from `ls ~/backup-demo/destination/archives/`.
+
+## Troubleshooting
+
+- **`rsync: command not found`** — run `sudo dnf install rsync`.
+- **`flock: command not found`** — run `sudo dnf install util-linux`.
+- **`dnf: command not found`** — you are probably on an older CentOS; use `yum` instead of `dnf`.
+- **cron does not run** — check `systemctl status crond`, run `crontab -l`, and use absolute paths.
+- **`destination directory must already exist`** — create it with `mkdir -p /path/to/destination`.
+- **`Permission denied`** — run the project from your home directory (`~/...`) and check file permissions with `ls -l`.
+
+## Viva questions
+
+1. **What is Bash?** A command interpreter used to execute shell commands and scripts.
+2. **What does rsync do?** Copies and synchronizes files efficiently.
+3. **What is a compressed archive?** A packaged set of files reduced in size using a compression algorithm.
+4. **What is cron?** A Linux scheduler that runs commands at specified times; on CentOS the daemon is `crond`.
+5. **Why use timestamps?** To distinguish backups and keep historical versions.
+6. **What is a symbolic link?** A filesystem entry that points to another path; here `latest` points to the newest snapshot.
+7. **Why use a lock?** To prevent simultaneous runs from modifying the same destination.
+
+## Conclusion
+
+The File Backup Script automates repetitive backup work by creating timestamped snapshots, optionally compressing them, maintaining a log, and removing old backups according to a retention policy. Cron can run it at regular intervals, reducing the risk of losing important files.
